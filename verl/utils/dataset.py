@@ -112,6 +112,7 @@ class RLHFDataset(Dataset):
         max_pixels: Optional[int] = None,
         filter_overlong_prompts: bool = True,
         filter_overlong_prompts_workers: int = 16,
+        preprocessed_dir: Optional[str] = None,
     ):
         self.tokenizer = tokenizer
         self.processor = processor
@@ -125,6 +126,7 @@ class RLHFDataset(Dataset):
         self.truncation = truncation
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.preprocessed_dir = preprocessed_dir
 
         if "@" in data_path:
             data_path, data_split = data_path.split("@")
@@ -219,7 +221,105 @@ class RLHFDataset(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def _try_load_preprocessed(self, index: int) -> Optional[dict]:
+        """Fast path: load precomputed processor outputs from .npz file."""
+        if self.preprocessed_dir is None:
+            return None
+        npz_path = os.path.join(self.preprocessed_dir, f"sample_{index:08d}.npz")
+        if not os.path.isfile(npz_path):
+            return None
+        try:
+            import numpy as np
+            data = np.load(npz_path)
+            example = {}
+            # Reconstruct tensors
+            input_ids = torch.from_numpy(data["input_ids"])
+            attention_mask = torch.from_numpy(data["attention_mask"])
+            raw_prompt_ids = data["raw_prompt_ids"].tolist()
+            prompt = str(data["prompt_text"]) if "prompt_text" in data else ""
+
+            # Reconstruct model_inputs for position_ids computation
+            model_inputs = {}
+            for key in ("pixel_values", "image_grid_thw", "second_per_grid_ts", "video_grid_thw", "mm_token_type_ids"):
+                if key in data:
+                    model_inputs[key] = torch.from_numpy(data[key])
+
+            # Compute position_ids exactly as the slow path does
+            if self.processor is not None and self.processor.__class__.__name__ == "Qwen3_5_VLProcessor":
+                from ..models.transformers.qwen3_5 import get_rope_index as get_rope_index_qwen35
+                mm_token_type_ids = model_inputs.get("mm_token_type_ids", None)
+                if mm_token_type_ids is not None:
+                    mm_token_type_ids = mm_token_type_ids[0]
+                else:
+                    mm_token_type_ids = torch.zeros_like(input_ids, dtype=torch.int)
+                    if hasattr(self.processor, "image_token_id"):
+                        mm_token_type_ids[input_ids == self.processor.image_token_id] = 1
+                    if hasattr(self.processor, "video_token_id"):
+                        mm_token_type_ids[input_ids == self.processor.video_token_id] = 2
+                position_ids = get_rope_index_qwen35(
+                    self.processor,
+                    input_ids=input_ids,
+                    mm_token_type_ids=mm_token_type_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw", None),
+                    video_grid_thw=model_inputs.get("video_grid_thw", None),
+                    attention_mask=attention_mask,
+                )
+            elif self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
+                if self.processor.__class__.__name__ in ("Qwen3VLProcessor",):
+                    from ..models.transformers.qwen3_vl import get_rope_index
+                else:
+                    from ..models.transformers.qwen2_vl import get_rope_index
+                vision_position_ids = get_rope_index(
+                    self.processor,
+                    input_ids=input_ids,
+                    image_grid_thw=model_inputs.get("image_grid_thw", None),
+                    video_grid_thw=model_inputs.get("video_grid_thw", None),
+                    second_per_grid_ts=model_inputs.get("second_per_grid_ts", None),
+                    attention_mask=attention_mask,
+                )
+                text_position_ids = torch.arange(len(input_ids)).unsqueeze(0)
+                position_ids = torch.cat((text_position_ids, vision_position_ids), dim=0)
+            else:
+                position_ids = torch.clip(attention_mask.cumsum(dim=0) - 1, min=0, max=None)
+
+            # Postprocess (pad/truncate)
+            input_ids, attention_mask, position_ids = VF.postprocess_data(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                max_length=self.max_prompt_length,
+                pad_token_id=self.tokenizer.pad_token_id,
+                left_pad=True,
+                truncation=self.truncation,
+            )
+            # Truncate raw_prompt_ids if needed
+            if len(raw_prompt_ids) > self.max_prompt_length:
+                if self.truncation == "left":
+                    raw_prompt_ids = raw_prompt_ids[-self.max_prompt_length :]
+                elif self.truncation == "right":
+                    raw_prompt_ids = raw_prompt_ids[: self.max_prompt_length]
+                elif self.truncation == "error":
+                    raise RuntimeError(f"Prompt length {len(raw_prompt_ids)} is longer than {self.max_prompt_length}.")
+
+            example["input_ids"] = input_ids
+            example["attention_mask"] = attention_mask
+            example["position_ids"] = position_ids
+            example["raw_prompt_ids"] = raw_prompt_ids
+            example["ground_truth"] = self.dataset[index][self.answer_key]
+            # Keep multi_modal_data marker so downstream code knows this sample had images
+            if "pixel_values" in model_inputs or "image_grid_thw" in model_inputs:
+                example["multi_modal_data"] = {"images": []}
+            return example
+        except Exception:
+            # If anything goes wrong, fall back to slow path
+            return None
+
     def __getitem__(self, index):
+        # Fast path: precomputed tensors
+        fast = self._try_load_preprocessed(index)
+        if fast is not None:
+            return fast
+
         example: dict = self.dataset[index]
         messages = self._build_messages(example)
         example.pop(self.prompt_key, None)
