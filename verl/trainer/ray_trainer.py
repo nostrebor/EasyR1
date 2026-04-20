@@ -134,7 +134,9 @@ def apply_kl_penalty(data: DataProto, kl_ctrl: KLController, kl_penalty="kl"):
     return data, metrics
 
 
-def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma: float = 1.0, lam: float = 1.0):
+def compute_advantage(
+    data: DataProto, adv_estimator: AdvantageEstimator, gamma: float = 1.0, lam: float = 1.0, quantile_k: float = -1.0
+):
     """Compute advantage estimates for policy optimization."""
     adv_inputs = {
         "token_level_rewards": data.batch["token_level_rewards"],
@@ -142,6 +144,7 @@ def compute_advantage(data: DataProto, adv_estimator: AdvantageEstimator, gamma:
         "index": data.non_tensor_batch["uid"],
         "gamma": gamma,
         "lam": lam,
+        "quantile_k": quantile_k,
     }
     if "values" in data.batch:
         adv_inputs["values"] = data.batch["values"]
@@ -645,6 +648,7 @@ class RayPPOTrainer:
                         adv_estimator=self.config.algorithm.adv_estimator,
                         gamma=self.config.algorithm.gamma,
                         lam=self.config.algorithm.lam,
+                        quantile_k=self.config.algorithm.quantile_k,
                     )
 
                 # update critic

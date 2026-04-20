@@ -174,10 +174,20 @@ def compute_gae_advantage_return(
 
 @register_adv_estimator(AdvantageEstimator.GRPO)
 def compute_grpo_outcome_advantage(
-    token_level_rewards: torch.Tensor, response_mask: torch.Tensor, index: torch.Tensor, eps: float = 1e-6, **kwargs
+    token_level_rewards: torch.Tensor,
+    response_mask: torch.Tensor,
+    index: torch.Tensor,
+    eps: float = 1e-6,
+    quantile_k: float = -1.0,
+    **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Compute advantage for GRPO, operating only on Outcome reward (with only one scalar reward for each response).
+
+    Supports Quantile Advantage Estimation (QAE): when 0 < quantile_k < 1, the group
+    baseline is torch.quantile(scores, quantile_k) instead of the mean. This creates a
+    two-regime gate: on hard queries only rare successes are reinforced; on easy queries
+    only residual failures are penalized.
 
     Args:
         token_level_rewards: `(torch.Tensor)`
@@ -188,6 +198,8 @@ def compute_grpo_outcome_advantage(
             shape: (bs,)
         eps: `(float)`
             epsilon value to avoid division by zero
+        quantile_k: `(float)`
+            QAE quantile for baseline. -1 or outside (0,1) uses standard mean.
 
     Returns:
         advantages: `(torch.Tensor)`
@@ -196,9 +208,10 @@ def compute_grpo_outcome_advantage(
             shape: (bs, response_length)
 
     """
+    use_qae = 0.0 < quantile_k < 1.0
     scores = token_level_rewards.sum(dim=-1)
     id2score = defaultdict(list)
-    id2mean, id2std = {}, {}
+    id2baseline, id2std = {}, {}
 
     bsz = scores.shape[0]
     for i in range(bsz):
@@ -206,11 +219,15 @@ def compute_grpo_outcome_advantage(
 
     for idx in id2score:
         assert len(id2score[idx]) > 1, "GRPO needs rollout.n > 1."
-        id2mean[idx] = torch.mean(torch.tensor(id2score[idx]))
-        id2std[idx] = torch.std(torch.tensor(id2score[idx]))
+        group_scores = torch.tensor(id2score[idx])
+        if use_qae:
+            id2baseline[idx] = torch.quantile(group_scores.float(), quantile_k)
+        else:
+            id2baseline[idx] = torch.mean(group_scores)
+        id2std[idx] = torch.std(group_scores)
 
     for i in range(bsz):
-        scores[i] = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + eps)
+        scores[i] = (scores[i] - id2baseline[index[i]]) / (id2std[index[i]] + eps)
 
     returns = scores.unsqueeze(-1) * response_mask
     return returns, returns

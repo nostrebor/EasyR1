@@ -84,6 +84,10 @@ class AlgorithmConfig:
     """kl horizon for adaptive kl controller"""
     kl_target: float = 0.1
     """target kl for adaptive kl controller"""
+    quantile_k: float = -1.0
+    """QAE (Quantile Advantage Estimation) baseline quantile. When >0 and <1,
+    replaces group mean baseline with torch.quantile(scores, quantile_k).
+    0.4 recommended for Clip-Higher recipes. -1 disables (uses standard mean)."""
     online_filtering: bool = False
     """use online filtering"""
     filter_key: str = "overall"
