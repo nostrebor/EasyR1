@@ -31,6 +31,11 @@ def compute_length_metrics(batch: DataProto) -> dict[str, Any]:
     prompt_length = batch.batch["attention_mask"][:, :-max_response_length].sum(-1).float()
     response_length = batch.batch["attention_mask"][:, -max_response_length:].sum(-1).float()
 
+    # Compute percentiles for prompt length to track tail behavior
+    prompt_length_np = prompt_length.detach().cpu().numpy()
+    p95 = float(np.percentile(prompt_length_np, 95))
+    p99 = float(np.percentile(prompt_length_np, 99))
+
     return {
         # response length
         "response_length/mean": torch.mean(response_length).detach().item(),
@@ -41,6 +46,8 @@ def compute_length_metrics(batch: DataProto) -> dict[str, Any]:
         "prompt_length/mean": torch.mean(prompt_length).detach().item(),
         "prompt_length/max": torch.max(prompt_length).detach().item(),
         "prompt_length/min": torch.min(prompt_length).detach().item(),
+        "prompt_length/p95": p95,
+        "prompt_length/p99": p99,
         "prompt_length/clip_ratio": torch.eq(prompt_length, max_prompt_length).float().mean().detach().item(),
     }
 

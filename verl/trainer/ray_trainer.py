@@ -688,6 +688,9 @@ class RayPPOTrainer:
             metrics.update(compute_timing_metrics(batch=batch, timing_raw=timing_raw))
             metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, num_gpus=num_gpus))
 
+            # Log configured max prompt length as a reference line in wandb/tensorboard
+            metrics["prompt_length/configured_max"] = self.config.data.max_prompt_length
+
             self.logger.log(data=metrics, step=self.global_step)
             main_tqdm.update()
 
