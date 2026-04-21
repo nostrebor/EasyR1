@@ -116,7 +116,16 @@ class vLLMRollout(BaseRollout):
         lora_kwargs = kwargs.pop("lora_kwargs", {})
         self.lora_kwargs = lora_kwargs
 
-        engine_kwargs = {}
+        # Disable fuse_allreduce_rms compile pass. On multi-node EFA clusters
+        # (p5en.48xlarge) this pass tries to initialize a FlashInfer AllReduce
+        # workspace — MNNVL requires NVLink between nodes (GB200 NVL72 only)
+        # and the trtllm backend is single-node only. The init fails with
+        # CUDA_ERROR_INVALID_DEVICE, and subsequent CUDA graph capture
+        # deadlocks one TP rank at 100% util (spin-wait kernel) while the
+        # rest of the cluster parks waiting. NCCL handles the allreduce fine;
+        # we just need to skip this compile pass.
+        from vllm.config import CompilationConfig
+        engine_kwargs = {"compilation_config": CompilationConfig(pass_config={"fuse_allreduce_rms": False})}
         if processor is not None:  # only VLMs have processor
             try:
                 from vllm.engine.arg_utils import EngineArgs
