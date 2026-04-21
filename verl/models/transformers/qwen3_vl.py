@@ -149,9 +149,17 @@ def _get_input_embeds(
         n_image_tokens = (input_ids == model.config.image_token_id).sum().item()
         n_image_features = image_embeds.shape[0]
         if n_image_tokens != n_image_features:
-            raise ValueError(
-                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+            import warnings
+            warnings.warn(
+                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}. "
+                f"Truncating/padding to match."
             )
+            if n_image_features > n_image_tokens:
+                image_embeds = image_embeds[:n_image_tokens]
+            else:
+                pad = torch.zeros(n_image_tokens - n_image_features, image_embeds.shape[1],
+                                  dtype=image_embeds.dtype, device=image_embeds.device)
+                image_embeds = torch.cat([image_embeds, pad], dim=0)
 
         mask = input_ids == model.config.image_token_id
         mask_unsqueezed = mask.unsqueeze(-1)
