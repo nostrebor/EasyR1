@@ -234,6 +234,10 @@ class RLHFDataset(Dataset):
             example = {}
             # Reconstruct tensors
             input_ids = torch.from_numpy(data["input_ids"])
+            # If preprocessed data exceeds max_prompt_length, fall back to slow path
+            # so that _filter_overlong_prompts can properly handle it.
+            if len(input_ids) > self.max_prompt_length:
+                return None
             attention_mask = torch.from_numpy(data["attention_mask"])
             raw_prompt_ids = data["raw_prompt_ids"].tolist()
             prompt = str(data["prompt_text"]) if "prompt_text" in data else ""
@@ -306,9 +310,16 @@ class RLHFDataset(Dataset):
             example["position_ids"] = position_ids
             example["raw_prompt_ids"] = raw_prompt_ids
             example["ground_truth"] = self.dataset[index][self.answer_key]
-            # Keep multi_modal_data marker so downstream code knows this sample had images
+            # Reconstruct multi_modal_data from the original dataset row
+            # (the .npz does not store image paths, but we need them for reprocessing)
             if "pixel_values" in model_inputs or "image_grid_thw" in model_inputs:
-                example["multi_modal_data"] = {"images": []}
+                row = self.dataset[index]
+                images = row.get(self.image_key, [])
+                if isinstance(images, str):
+                    images = [images]
+                if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):
+                    images = [os.path.join(self.image_dir, img) for img in images]
+                example["multi_modal_data"] = {"images": images}
             return example
         except Exception:
             # If anything goes wrong, fall back to slow path
